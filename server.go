@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,6 +73,9 @@ type DefaultServer struct {
 	// Initialized indicates if the server has been initialized
 	initialized bool
 	initMutex   sync.RWMutex
+
+	// Logger for structured logging
+	logger *slog.Logger
 }
 
 // RequestHandler defines a function that handles a JSON-RPC request
@@ -83,25 +89,26 @@ type ToolHandler func(arguments map[string]interface{}) (string, error)
 
 // NewServer creates a new MCP server with the given configuration
 func NewServer(serverInfo Implementation, capabilities ServerCapabilities) *DefaultServer {
-	server := &DefaultServer{
+
+	s := &DefaultServer{
 		serverInfo:           serverInfo,
 		capabilities:         capabilities,
 		requestHandlers:      make(map[string]RequestHandler),
 		notificationHandlers: make(map[string]NotificationHandler),
-		resources:            []Resource{},
-		prompts:              []Prompt{},
-		tools:                []Tool{},
 		toolHandlers:         make(map[string]ToolHandler),
-		authConfig:           nil, // No authentication by default
+		logger: slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
 	}
 
-	// Register built-in request handlers
-	server.registerRequestHandlers()
+	s.registerRequestHandlers()
+	return s
+}
 
-	// Register built-in notification handlers
-	server.registerNotificationHandlers()
-
-	return server
+func NewServerWithLogger(serverInfo Implementation, capabilities ServerCapabilities, logger *slog.Logger) *DefaultServer {
+	s := NewServer(serverInfo, capabilities)
+	s.logger = logger
+	return s
 }
 
 // Helper function to check if protocol versions are compatible
@@ -161,8 +168,12 @@ func isProtocolVersionCompatible(clientVersion, serverVersion string) bool {
 
 // registerRequestHandlers registers the built-in request handlers
 func (s *DefaultServer) registerRequestHandlers() {
+	s.logger.Debug("registering request handlers")
+
 	// Initialize request
 	s.requestHandlers["initialize"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
+		s.logger.Debug("received initialize request")
+
 		s.initMutex.Lock()
 		defer s.initMutex.Unlock()
 
@@ -190,6 +201,7 @@ func (s *DefaultServer) registerRequestHandlers() {
 		}
 
 		s.initialized = true
+		s.logger.Info("initialized", "protocol_version", initParams.ProtocolVersion)
 
 		// Return initialize result
 		return InitializeResult{
@@ -202,11 +214,15 @@ func (s *DefaultServer) registerRequestHandlers() {
 	// Ping request
 	s.requestHandlers["ping"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
 		// Just return an empty result
+		s.logger.Debug("received ping request")
+
 		return EmptyResult{}, nil
 	}
 
 	// List resources request
 	s.requestHandlers["resources/list"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
+		s.logger.Debug("received resources/list request")
+
 		if !s.isInitialized() {
 			return nil, errors.New("server not initialized")
 		}
@@ -275,6 +291,8 @@ func (s *DefaultServer) registerRequestHandlers() {
 
 	// List prompts request
 	s.requestHandlers["prompts/list"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
+		s.logger.Debug("received prompts/list request")
+
 		if !s.isInitialized() {
 			return nil, errors.New("server not initialized")
 		}
@@ -292,6 +310,8 @@ func (s *DefaultServer) registerRequestHandlers() {
 
 	// List tools request
 	s.requestHandlers["tools/list"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
+		s.logger.Debug("received tools/list request")
+
 		if !s.isInitialized() {
 			return nil, errors.New("server not initialized")
 		}
@@ -309,6 +329,8 @@ func (s *DefaultServer) registerRequestHandlers() {
 
 	// Tools call request
 	s.requestHandlers["tools/call"] = func(id RequestID, params map[string]interface{}) (interface{}, error) {
+		s.logger.Debug("received tools/call request")
+
 		if !s.isInitialized() {
 			return nil, errors.New("server not initialized")
 		}
@@ -386,6 +408,8 @@ func (s *DefaultServer) registerRequestHandlers() {
 
 // registerNotificationHandlers registers the built-in notification handlers
 func (s *DefaultServer) registerNotificationHandlers() {
+	s.logger.Debug("registering notification handlers")
+
 	// Initialized notification
 	s.notificationHandlers["notifications/initialized"] = func(params map[string]interface{}) error {
 		// This notification is simply acknowledging that initialization is complete
@@ -401,200 +425,230 @@ func (s *DefaultServer) isInitialized() bool {
 	return s.initialized
 }
 
-// AddResource adds a resource to the server
+// AddResource adds a new resource to the server
 func (s *DefaultServer) AddResource(resource Resource) {
 	s.resourcesMutex.Lock()
 	defer s.resourcesMutex.Unlock()
-
-	// Check if resource already exists
-	for i, r := range s.resources {
-		if r.URI == resource.URI {
-			// Replace existing resource
-			s.resources[i] = resource
-			return
-		}
-	}
-
-	// Add new resource
 	s.resources = append(s.resources, resource)
+	s.logger.Info("resource added", "uri", resource.URI, "name", resource.Name)
 }
 
-// AddPrompt adds a prompt to the server
+// AddPrompt adds a new prompt to the server
 func (s *DefaultServer) AddPrompt(prompt Prompt) {
 	s.promptsMutex.Lock()
 	defer s.promptsMutex.Unlock()
-
-	// Check if prompt already exists
-	for i, p := range s.prompts {
-		if p.Name == prompt.Name {
-			// Replace existing prompt
-			s.prompts[i] = prompt
-			return
-		}
-	}
-
-	// Add new prompt
 	s.prompts = append(s.prompts, prompt)
+	s.logger.Info("prompt added", "name", prompt.Name)
 }
 
-// AddTool adds a tool to the server
+// AddTool adds a new tool to the server
 func (s *DefaultServer) AddTool(tool Tool, handler ToolHandler) {
 	s.toolsMutex.Lock()
 	defer s.toolsMutex.Unlock()
+	s.tools = append(s.tools, tool)
+	s.toolHandlers[tool.Name] = handler
+	s.logger.Info("tool added", "name", tool.Name)
+}
 
-	// Check if tool already exists
-	for i, t := range s.tools {
-		if t.Name == tool.Name {
-			// Replace existing tool
-			s.tools[i] = tool
-			s.toolHandlers[t.Name] = handler
+// Handle processes incoming HTTP requests
+func (s *DefaultServer) Handle(w http.ResponseWriter, r *http.Request) {
+	s.logger.Debug("received request", "method", r.Method, "path", r.URL.Path)
+
+	if r.Method != http.MethodPost {
+		s.logger.Warn("invalid HTTP method", "method", r.Method)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if r.Header.Get("Content-Type") != "application/json" {
+		s.logger.Warn("invalid content type", "content_type", r.Header.Get("Content-Type"))
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Validate authentication if configured
+	if s.authConfig != nil {
+		if !s.validateAuth(r) {
+			s.logger.Warn("authentication failed")
+			w.Header().Set("WWW-Authenticate", "Basic realm=\"MCP Server\"")
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 	}
 
-	// Add new tool
-	s.tools = append(s.tools, tool)
-	s.toolHandlers[tool.Name] = handler
+	// Only accept POST requests to /jsonrpc endpoint
+	if r.Method != http.MethodPost || r.URL.Path != "/jsonrpc" {
+		http.Error(w, "Method or path not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the request body
+	requestBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Error("failed to read request body", "error", err)
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		return
+	}
+
+	// Process the request
+	responseBytes, err := s.handleRequest(requestBytes)
+	if err != nil {
+		s.logger.Error("failed to process request", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// If there's no response (notification), return 204 No Content
+	if responseBytes == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Set the content type and write the response
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(responseBytes)
 }
 
-// Handle processes incoming JSON-RPC requests and returns appropriate responses
-func (s *DefaultServer) Handle(requestBytes []byte) ([]byte, error) {
-	// Check if it's a batch request (array) or single request
-	if len(requestBytes) > 0 && requestBytes[0] == '[' {
-		// It's a batch request
-		return s.handleBatchRequest(requestBytes)
-	}
-
-	// It's a single request or notification
-	return s.handleSingleRequest(requestBytes)
-}
-
-// handleBatchRequest processes a batch of JSON-RPC requests and returns a batch of responses
-func (s *DefaultServer) handleBatchRequest(requestBytes []byte) ([]byte, error) {
-	// Unmarshal the batch request
-	var batchRequest []json.RawMessage
-	if err := json.Unmarshal(requestBytes, &batchRequest); err != nil {
-		// Invalid JSON
-		return s.createErrorResponse(nil, ParseError, "Invalid JSON batch", nil)
-	}
-
-	// Empty batch is invalid according to JSON-RPC 2.0
-	if len(batchRequest) == 0 {
-		return s.createErrorResponse(nil, InvalidRequest, "Empty batch request", nil)
-	}
-
-	// Process each request in the batch
-	var batchResponse []json.RawMessage
-	for _, requestItemBytes := range batchRequest {
-		responseBytes, err := s.handleSingleRequest(requestItemBytes)
-		if err != nil {
-			// Log the error but continue processing the batch
-			fmt.Printf("Error handling batch item: %v\n", err)
-		}
-
-		// Only add responses for requests (not notifications) to the batch response
-		if responseBytes != nil {
-			batchResponse = append(batchResponse, responseBytes)
-		}
-	}
-
-	// If all requests were notifications, return no response
-	if len(batchResponse) == 0 {
-		return nil, nil
-	}
-
-	// Marshal the batch response
-	return json.Marshal(batchResponse)
-}
-
-// handleSingleRequest processes a single JSON-RPC request or notification
-func (s *DefaultServer) handleSingleRequest(requestBytes []byte) ([]byte, error) {
-	// Check if it's a JSON-RPC request or notification
-	var msg struct {
-		JSONRPC string     `json:"jsonrpc"`
-		ID      *RequestID `json:"id,omitempty"`
-		Method  string     `json:"method"`
-	}
-
+// handleRequest processes the raw request bytes and returns the response
+func (s *DefaultServer) handleRequest(requestBytes []byte) ([]byte, error) {
+	var msg interface{}
 	if err := json.Unmarshal(requestBytes, &msg); err != nil {
-		// Invalid JSON
-		return s.createErrorResponse(nil, ParseError, "Invalid JSON", nil)
+		s.logger.Error("failed to decode request", "error", err)
+		return nil, fmt.Errorf("Invalid JSON: %v", err)
 	}
 
-	if msg.JSONRPC != JSONRPCVersion {
-		// Invalid JSON-RPC version
-		return s.createErrorResponse(nil, InvalidRequest, "Invalid JSON-RPC version", nil)
+	// Handle batch requests
+	if msgs, ok := msg.([]interface{}); ok {
+		s.logger.Debug("received batch request", "count", len(msgs))
+		return s.handleBatchRequest(msgs)
 	}
 
-	// Check if it's a request or notification
-	if msg.ID != nil {
-		// It's a request
-		var request JSONRPCRequest
-		if err := json.Unmarshal(requestBytes, &request); err != nil {
-			return s.createErrorResponse(msg.ID, ParseError, "Invalid JSON-RPC request", nil)
-		}
+	// Handle single request
+	s.logger.Debug("received single request")
+	return s.handleSingleRequest(msg)
+}
 
-		// Find the appropriate handler
-		handler, ok := s.requestHandlers[request.Method]
-		if !ok {
-			return s.createErrorResponse(msg.ID, MethodNotFound, fmt.Sprintf("Method not found: %s", request.Method), nil)
-		}
+// handleBatchRequest processes a batch of JSON-RPC requests
+func (s *DefaultServer) handleBatchRequest(msgs []interface{}) ([]byte, error) {
+	if len(msgs) == 0 {
+		s.logger.Warn("empty batch request")
+		return nil, fmt.Errorf("Empty batch request")
+	}
 
-		// Call the handler
-		result, err := handler(*msg.ID, request.Params)
+	var responses []interface{}
+	for _, msg := range msgs {
+		// Convert the message to a JSONRPCRequest or JSONRPCNotification
+		msgBytes, err := json.Marshal(msg)
 		if err != nil {
-			return s.createErrorResponse(msg.ID, InternalError, err.Error(), nil)
+			s.logger.Error("failed to marshal batch message", "error", err)
+			continue
 		}
 
-		// Marshal the result to a general JSON object
+		var request JSONRPCRequest
+		var notification JSONRPCNotification
+		if err := json.Unmarshal(msgBytes, &request); err == nil && request.ID != nil {
+			// It's a request
+			response, err := s.handleSingleRequest(request)
+			if err != nil {
+				s.logger.Error("failed to handle batch request", "error", err)
+				continue
+			}
+			responses = append(responses, response)
+		} else if err := json.Unmarshal(msgBytes, &notification); err == nil {
+			// It's a notification
+			if err := s.handleNotification(notification); err != nil {
+				s.logger.Error("failed to handle batch notification", "error", err)
+			}
+		}
+	}
+
+	if len(responses) == 0 {
+		return nil, nil // No responses for notifications
+	}
+
+	responseBytes, err := json.Marshal(responses)
+	if err != nil {
+		s.logger.Error("failed to marshal batch response", "error", err)
+		return nil, fmt.Errorf("Failed to marshal batch response: %v", err)
+	}
+
+	return responseBytes, nil
+}
+
+// handleSingleRequest processes a single JSON-RPC request
+func (s *DefaultServer) handleSingleRequest(msg interface{}) ([]byte, error) {
+	msgBytes, err := json.Marshal(msg)
+	if err != nil {
+		s.logger.Error("failed to marshal request", "error", err)
+		return nil, fmt.Errorf("Failed to marshal request: %v", err)
+	}
+
+	var request JSONRPCRequest
+	if err := json.Unmarshal(msgBytes, &request); err != nil {
+		s.logger.Error("failed to decode request", "error", err)
+		return nil, fmt.Errorf("Invalid request format: %v", err)
+	}
+
+	// Check if the server has been initialized
+	if !s.isInitialized() && request.Method != "initialize" {
+		s.logger.Warn("request received before initialization", "method", request.Method)
+		return nil, fmt.Errorf("Server not initialized")
+	}
+
+	// Get the handler for this method
+	handler, ok := s.requestHandlers[request.Method]
+	if !ok {
+		s.logger.Warn("method not found", "method", request.Method)
+		return nil, fmt.Errorf("Method not found: %s", request.Method)
+	}
+
+	// Call the handler
+	result, err := handler(request.ID, request.Params)
+	if err != nil {
+		s.logger.Error("handler error", "method", request.Method, "error", err)
+		return nil, err
+	}
+
+	// Create the response with the result
+	var response JSONRPCResponse
+	if result != nil {
+		// First marshal the result to JSON
 		resultBytes, err := json.Marshal(result)
 		if err != nil {
-			return s.createErrorResponse(msg.ID, InternalError, "Error marshaling result", nil)
+			s.logger.Error("failed to marshal result", "error", err)
+			return nil, fmt.Errorf("Failed to marshal result: %v", err)
 		}
 
-		// Create the response
-		response := struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      RequestID       `json:"id"`
-			Result  json.RawMessage `json:"result"`
-		}{
+		// Create the response with empty Result
+		response = JSONRPCResponse{
 			JSONRPC: JSONRPCVersion,
-			ID:      *msg.ID,
-			Result:  resultBytes,
+			ID:      request.ID,
+			Result:  Result{}, // Initialize with empty Result
 		}
 
-		// Marshal the response
-		responseBytes, err := json.Marshal(response)
-		if err != nil {
-			return s.createErrorResponse(msg.ID, InternalError, "Error marshaling response", nil)
+		// Unmarshal the result bytes into the Result field
+		if err := json.Unmarshal(resultBytes, &response.Result.Meta); err != nil {
+			s.logger.Error("failed to unmarshal result", "error", err)
+			return nil, fmt.Errorf("Failed to unmarshal result: %v", err)
 		}
-
-		return responseBytes, nil
 	} else {
-		// It's a notification
-		var notification JSONRPCNotification
-		if err := json.Unmarshal(requestBytes, &notification); err != nil {
-			// We don't send error responses for notifications
-			return nil, fmt.Errorf("invalid JSON-RPC notification: %w", err)
-		}
 
-		// Find the appropriate handler
-		handler, ok := s.notificationHandlers[notification.Method]
-		if !ok {
-			// We don't send error responses for notifications with unknown methods
-			return nil, nil
+		// Create response with empty Result for nil results
+		response = JSONRPCResponse{
+			JSONRPC: JSONRPCVersion,
+			ID:      request.ID,
+			Result:  Result{},
 		}
-
-		// Call the handler
-		err := handler(notification.Params)
-		if err != nil {
-			// We don't send error responses for notifications with errors
-			return nil, fmt.Errorf("error handling notification: %w", err)
-		}
-
-		// No response for notifications
-		return nil, nil
 	}
+
+	// Marshal the response
+	responseBytes, err := json.Marshal(response)
+	if err != nil {
+		s.logger.Error("failed to marshal response", "error", err)
+		return nil, fmt.Errorf("Failed to marshal response: %v", err)
+	}
+
+	return responseBytes, nil
 }
 
 // createErrorResponse creates a JSON-RPC error response
@@ -631,6 +685,7 @@ func (s *DefaultServer) createErrorResponse(id *RequestID, code int, message str
 // SetAuthConfig sets the authentication configuration for the server
 func (s *DefaultServer) SetAuthConfig(config *AuthConfig) {
 	s.authConfig = config
+	s.logger.Info("authentication configured", "required", config.Required)
 }
 
 // validateAuth checks if the request is authenticated
@@ -656,68 +711,42 @@ func (s *DefaultServer) validateAuth(r *http.Request) bool {
 }
 
 // Start starts the HTTP server to listen for MCP requests
-func (s *DefaultServer) Start(address string) error {
-	// Create a handler for MCP requests
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only accept POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+func (s *DefaultServer) Start(addr string) error {
+	s.logger.Info("starting MCP server", "address", addr)
 
-		// Check authentication if required
-		if !s.validateAuth(r) {
-			w.Header().Set("WWW-Authenticate", "Basic realm=\"MCP Server\"")
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		// Read the request body
-		requestBytes := make([]byte, r.ContentLength)
-		_, err := r.Body.Read(requestBytes)
-		if err != nil && err.Error() != "EOF" {
-			http.Error(w, "Error reading request body", http.StatusBadRequest)
-			return
-		}
-
-		// Process the request
-		responseBytes, err := s.Handle(requestBytes)
-		if err != nil {
-			// If this was a notification, there's no response
-			if responseBytes == nil {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// If there's no response (notification), return 204 No Content
-		if responseBytes == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		// Set the content type and write the response
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(responseBytes)
-	})
-
-	// Create the HTTP server
 	s.httpServer = &http.Server{
-		Addr:    address,
-		Handler: handler,
+		Addr:    addr,
+		Handler: http.HandlerFunc(s.Handle),
 	}
 
-	// Start the server
+	s.logger.Info("server started successfully")
 	return s.httpServer.ListenAndServe()
 }
 
 // Stop stops the HTTP server
 func (s *DefaultServer) Stop() error {
+	s.logger.Info("stopping MCP server")
 	if s.httpServer != nil {
 		return s.httpServer.Close()
 	}
+	return nil
+}
+
+// handleNotification processes a JSON-RPC notification
+func (s *DefaultServer) handleNotification(notification JSONRPCNotification) error {
+	// Get the handler for this method
+	handler, ok := s.notificationHandlers[notification.Method]
+	if !ok {
+		s.logger.Warn("notification method not found", "method", notification.Method)
+		return nil // We don't send error responses for notifications
+	}
+
+	// Call the handler
+	err := handler(notification.Params)
+	if err != nil {
+		s.logger.Error("notification handler error", "method", notification.Method, "error", err)
+		return err
+	}
+
 	return nil
 }

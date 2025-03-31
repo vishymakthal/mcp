@@ -156,6 +156,7 @@ type ServerCapabilities struct {
 	Tools *struct {
 		ListChanged bool `json:"listChanged,omitempty"`
 	} `json:"tools,omitempty"`
+	ProtocolVersion string `json:"protocolVersion"`
 }
 
 // InitializeRequest is sent from the client to the server when it first connects
